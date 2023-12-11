@@ -74,102 +74,91 @@ const onProxyError = (err, req, res) => {
 };
 
 const appendHead = (proxyRes, res, append) => {
-  const encoding = proxyRes.headers['content-encoding'];
-  let handler;
-  let encoder;
-  let appendEncoded;
-  switch (encoding) {
-    case 'gzip':
-      handler = zlib.gzip;
-      break;
-    default:
-      appendEncoded = append;
-  }
-  if (handler) {
-    encoder = new Promise((resolve, reject) => {
-      handler(append, (e, buf) => {
-        if (e) {
-          reject(e);
-        }
-        appendEncoded = buf;
-        resolve();
-      });
-    });
-  }
-  if ('content-length' in proxyRes.headers) {
-    delete proxyRes.headers['content-length'];
-  }
-  const _end = res.end;
-  res.end = async () => {
-    if (!appendEncoded) {
-      try {
-        await encoder;
-      } catch (e) {
-        console.error(`Encoder error: ${e}`);
-        return;
-      }
+  return new Promise((resolve) => {
+    const encoding = proxyRes.headers['content-encoding'];
+    let handler;
+    let encoder;
+    let appendEncoded;
+    switch (encoding) {
+      case 'gzip':
+        handler = zlib.gzip;
+        break;
+      default:
+        appendEncoded = append;
     }
-    res.write(appendEncoded);
-    _end.call(res);
-  };
+    if (handler) {
+      encoder = new Promise((resolve, reject) => {
+        handler(append, (e, buf) => {
+          if (e) {
+            reject(e);
+          }
+          appendEncoded = buf;
+          resolve();
+        });
+      });
+    }
+    if ('content-length' in proxyRes.headers) {
+      delete proxyRes.headers['content-length'];
+    }
+    const _end = res.end;
+    res.end = async () => {
+      if (!appendEncoded) {
+        try {
+          await encoder;
+        } catch (e) {
+          console.error(`Encoder error: ${e}`);
+          return;
+        }
+      }
+      res.write(appendEncoded);
+      _end.call(res);
+      resolve();
+    };
+  });
 };
 
 const transformEncoded = (proxyRes, res, append) => {
-  const encoding = proxyRes.headers['content-encoding'];
-  let decodeHandler;
-  let encodeHandler;
-  let encoder;
-  let decoder;
-  switch (encoding) {
-    case 'gzip':
-      decodeHandler = zlib.createGunzip;
-      encodeHandler = zlib.createGzip;
-      break;
-  }
-  if (decodeHandler) {
-    decoder = decodeHandler();
-    encoder = encodeHandler();
-    const _write = res.write.bind(res);
-    const _end = res.end.bind(res);
-    res.write = (chunk) => {
-      decoder.write(chunk);
-    };
-    res.end = () => {
-      decoder.end();
-    };
-    if (GZIP_METHOD === 'transform') {
+  return new Promise((resolve) => {
+    const encoding = proxyRes.headers['content-encoding'];
+    let decodeHandler;
+    let encodeHandler;
+    let encoder;
+    let decoder;
+    switch (encoding) {
+      case 'gzip':
+        decodeHandler = zlib.createGunzip;
+        encodeHandler = zlib.createGzip;
+        break;
+    }
+    if (decodeHandler) {
+      decoder = decodeHandler();
+      encoder = encodeHandler();
+      const chunks = [];
+
+      decoder.on('data', (chunk) => {
+        chunks.push(chunk);
+      });
+
       decoder.on('end', () => {
-        encoder.write(append);
+        const decodedData = Buffer.concat(chunks);
+        encoder.write(Buffer.concat([decodedData, Buffer.from(append)]));
         encoder.end();
       });
-      decoder.pipe(encoder, {end: false});
+
       encoder.on('data', (chunk) => {
-        _write(chunk);
+        res.write(chunk);
       });
+
       encoder.on('end', () => {
-        _end();
+        resolve();
       });
-    } else if (GZIP_METHOD === 'decode') {
-      decoder.on('data', (chunk) => {
-        _write(chunk);
-      });
-      decoder.on('end', () => {
-        _write(append);
-        _end();
-      });
-      if ('content-encoding' in proxyRes.headers) {
-        delete proxyRes.headers['content-encoding'];
-      }
     }
-  }
-  if ('content-length' in proxyRes.headers) {
-    delete proxyRes.headers['content-length'];
-  }
+  });
 };
 
-const processResponse = (proxyRes, res, append) => {
+const processResponse = async (proxyRes, res, append) => {
   if (['transform', 'decode'].includes(GZIP_METHOD) && proxyRes.headers['content-encoding']) {
-    transformEncoded(proxyRes, res, append);
+    await transformEncoded(proxyRes, res, append);
   } else {
     appendHead(proxyRes, res, append);
   }
